@@ -1,0 +1,258 @@
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+#include <SoftwareSerial.h>
+#include <WiFi.h>
+
+// #######################################
+// ##       CONFIGURACION HARDWARE      ##
+// #######################################
+
+// Configuración del GPS (NEO-6M)
+#define GPS_RX 16  // Conectar al TX del GPS
+#define GPS_TX 17  // Conectar al RX del GPS
+HardwareSerial gpsSerial(1); // UART1 para el GPS
+TinyGPSPlus gps;
+
+// Configuración del SIM800L
+#define SIM800L_RX 27  // Conectar al TX del SIM800L
+#define SIM800L_TX 26  // Conectar al RX del SIM800L
+SoftwareSerial sim800lSerial(SIM800L_RX, SIM800L_TX);
+
+// Configuración del servidor (MODIFICADO para HTTP)
+const char* SERVER_HOST = "http://207.244.251.239/";
+const char* SERVER_PORT = "8081"; // Puerto estándar para HTTP
+const char* APN = "claro";  // Reemplazar con APN de tu operador
+
+// Datos de tu red WiFi
+const char* ssid = "FAMILIA ISAAC31";
+const char* password = "Kt@12345";
+
+// #######################################
+// ##         VARIABLES GLOBALES        ##
+// #######################################
+
+unsigned long lastSendTime = 0;
+const unsigned long SEND_INTERVAL = 30000; // 30 segundos entre envíos
+
+// #######################################
+// ##           SETUP INICIAL           ##
+// #######################################
+
+void setup() {
+  // Inicializar comunicación serial para depuración
+  Serial.begin(115200);
+  while (!Serial); // Esperar a que el puerto serial esté listo
+  
+  Serial.println("\nIniciando sistema ESP32 con GPS y GSM...");
+
+  // Inicializar conexión WiFi
+  Serial.println("Conectando a WiFi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ Conectado a WiFi");
+  Serial.print("📡 Dirección IP: ");
+  Serial.println(WiFi.localIP());
+
+  // Inicializar GPS
+  initGPS();
+  
+  // Inicializar módulo GSM
+  initGSM();
+  
+  Serial.println("Sistema inicializado correctamente");
+}
+
+// #######################################
+// ##            LOOP PRINCIPAL         ##
+// #######################################
+
+void loop() {
+  // Procesar datos del GPS
+  processGPSData();
+  
+  // Enviar datos periódicamente
+  if (millis() - lastSendTime > SEND_INTERVAL) {
+    if (gps.location.isValid()) {
+      sendLocationData();
+    } else {
+      Serial.println("Ubicación GPS no válida, no se puede enviar");
+    }
+    lastSendTime = millis();
+  }
+  
+  // Pequeña pausa para evitar sobrecarga
+  delay(100);
+}
+
+// #######################################
+// ##      FUNCIONES DE INICIALIZACIÓN  ##
+// #######################################
+
+void initGPS() {
+  Serial.println("Inicializando GPS...");
+  gpsSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+  
+  // Esperar inicialización
+  unsigned long startTime = millis();
+  while (millis() - startTime < 5000) {
+    if (gpsSerial.available()) {
+      char c = gpsSerial.read();
+      if (gps.encode(c)) {
+        Serial.println("GPS detectado correctamente");
+        return;
+      }
+    }
+  }
+  
+  Serial.println("Error: No se pudo inicializar el GPS");
+}
+
+void initGSM() {
+  Serial.println("Inicializando módulo GSM...");
+  sim800lSerial.begin(9600);
+  
+  // Comandos AT básicos para verificar conexión
+  sendATCommand("AT", "OK", 2000);
+  sendATCommand("AT+CPIN?", "READY", 2000);
+  sendATCommand("AT+CREG?", "0,1", 2000); // Verificar registro en la red
+  
+  // Configurar GPRS
+  sendATCommand("AT+CIPSHUT", "SHUT OK", 5000);
+  sendATCommand("AT+CIPMUX=0", "OK", 1000);
+  sendATCommand("AT+CSTT=\"" + String(APN) + "\"", "OK", 3000);
+  sendATCommand("AT+CIICR", "OK", 5000);
+  
+  // Obtener dirección IP
+  sendATCommand("AT+CIFSR", ".", 3000);
+  
+  Serial.println("Módulo GSM inicializado");
+}
+
+// #######################################
+// ##      FUNCIONES DE PROCESAMIENTO   ##
+// #######################################
+
+void processGPSData() {
+  while (gpsSerial.available() > 0) {
+    if (gps.encode(gpsSerial.read())) {
+      // Datos GPS decodificados correctamente
+      displayGPSInfo();
+    }
+  }
+  
+  // Si pasan más de 5 segundos sin datos GPS
+  if (millis() > 5000 && gps.charsProcessed() < 10) {
+    Serial.println("Advertencia: No se reciben datos del GPS");
+  }
+}
+
+void displayGPSInfo() {
+  if (gps.location.isValid()) {
+    Serial.print("Ubicación: ");
+    Serial.print(gps.location.lat(), 6);
+    Serial.print(", ");
+    Serial.println(gps.location.lng(), 6);
+    
+    Serial.print("Fecha: ");
+    Serial.print(gps.date.day());
+    Serial.print("/");
+    Serial.print(gps.date.month());
+    Serial.print("/");
+    Serial.println(gps.date.year());
+    
+    Serial.print("Hora: ");
+    Serial.print(gps.time.hour());
+    Serial.print(":");
+    Serial.print(gps.time.minute());
+    Serial.print(":");
+    Serial.println(gps.time.second());
+  } else {
+    Serial.println("Esperando señal GPS...");
+  }
+}
+
+// #######################################
+// ##      FUNCIONES DE COMUNICACIÓN    ##
+// #######################################
+
+void sendLocationData() {
+  if (!gps.location.isValid()) {
+    Serial.println("Error: Ubicación no válida para enviar");
+    return;
+  }
+
+  // Construir mensaje
+  String message = "hello";
+  float latitude = gps.location.lat();
+  float longitude = gps.location.lng();
+  
+  String postData = "lat=" + String(latitude, 6) + 
+                   "&lon=" + String(longitude, 6) + 
+                   "&msg=" + message;
+  
+  Serial.println("Preparando para enviar datos al servidor HTTP...");
+  Serial.println(postData);
+
+  // Establecer conexión TCP con el servidor HTTP (sin SSL)
+  String connectCmd = "AT+CIPSTART=\"TCP\",\"" + String(SERVER_HOST) + "\",\"" + String(SERVER_PORT) + "\"";
+  if (!sendATCommand(connectCmd, "CONNECT OK", 15000)) {
+    Serial.println("Error al conectar con el servidor HTTP");
+    return;
+  }
+
+  // Preparar y enviar datos HTTP
+  String httpRequest = "POST / HTTP/1.1\r\n";
+  httpRequest += "Host: " + String(SERVER_HOST) + "\r\n";
+  httpRequest += "Content-Type: application/x-www-form-urlencoded\r\n";
+  httpRequest += "Content-Length: " + String(postData.length()) + "\r\n\r\n";
+  httpRequest += postData;
+
+  // Enviar datos
+  if (!sendATCommand("AT+CIPSEND=" + String(httpRequest.length()), ">", 2000)) {
+    Serial.println("Error al preparar envío");
+    sendATCommand("AT+CIPCLOSE", "CLOSE OK", 2000);
+    return;
+  }
+  
+  if (!sendATCommand(httpRequest, "SEND OK", 10000)) {
+    Serial.println("Error al enviar datos");
+  } else {
+    Serial.println("Datos enviados correctamente via HTTP");
+  }
+
+  // Cerrar conexión
+  sendATCommand("AT+CIPCLOSE", "CLOSE OK", 2000);
+}
+
+// #######################################
+// ##   FUNCIONES AUXILIARES GSM/AT     ##
+// #######################################
+
+bool sendATCommand(String command, String expectedResponse, unsigned long timeout) {
+  Serial.print("Enviando: ");
+  Serial.println(command);
+  
+  sim800lSerial.println(command);
+  
+  unsigned long startTime = millis();
+  String response = "";
+  
+  while (millis() - startTime < timeout) {
+    while (sim800lSerial.available()) {
+      char c = sim800lSerial.read();
+      response += c;
+      if (response.indexOf(expectedResponse) != -1) {
+        Serial.print("Respuesta recibida: ");
+        Serial.println(response);
+        return true;
+      }
+    }
+  }
+  
+  Serial.print("Timeout o respuesta inesperada: ");
+  Serial.println(response);
+  return false;
+}
